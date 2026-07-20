@@ -20,16 +20,15 @@ const SETTINGS_KEY = "pi-codex-usage";
 
 type JsonObject = Record<string, unknown>;
 type PercentMode = "left" | "used";
-type WindowName = "5h" | "7d";
 type Theme = ExtensionContext["ui"]["theme"];
 
 type Preferences = {
 	usageMode: PercentMode;
-	refreshWindow: WindowName;
 };
 
 type UsageWindow = {
 	used_percent?: number | null;
+	limit_window_seconds?: number | null;
 	reset_after_seconds?: number | null;
 	reset_at?: number | null;
 };
@@ -38,12 +37,12 @@ type RateLimitBucket = {
 	allowed?: boolean;
 	limit_reached?: boolean;
 	primary_window?: UsageWindow | null;
-	secondary_window?: UsageWindow | null;
 };
 
 type CodexUsageSnapshot = {
-	leftPercent: Record<WindowName, number | null>;
-	resetInSeconds: Record<WindowName, number | null>;
+	leftPercent: number | null;
+	resetInSeconds: number | null;
+	windowLabel: string;
 	isLimited: boolean;
 };
 
@@ -57,12 +56,7 @@ type DeepSeekBalance = {
 	}>;
 };
 
-const DEFAULT_PREFERENCES = { usageMode: "left", refreshWindow: "7d" } satisfies Preferences;
-const windows = {
-	"5h": { label: "5h:", field: "primary_window" },
-	"7d": { label: "7d:", field: "secondary_window" },
-} as const;
-const windowNames = Object.keys(windows) as WindowName[];
+const DEFAULT_PREFERENCES = { usageMode: "left" } satisfies Preferences;
 
 const preferenceCommands = [
 	{
@@ -70,12 +64,6 @@ const preferenceCommands = [
 		description: "Toggle Codex usage display mode, or set it explicitly: left | used",
 		key: "usageMode",
 		choices: ["left", "used"],
-	},
-	{
-		name: "codex-usage-reset-window",
-		description: "Toggle reset countdown window, or set it explicitly: 5h | 7d",
-		key: "refreshWindow",
-		choices: ["5h", "7d"],
 	},
 ] as const;
 
@@ -175,7 +163,6 @@ function normalizePreferences(value: unknown): Preferences {
 	const settings = asObject(value);
 	return {
 		usageMode: isOneOf(settings?.usageMode, ["left", "used"] as const) ? settings.usageMode : DEFAULT_PREFERENCES.usageMode,
-		refreshWindow: isOneOf(settings?.refreshWindow, ["5h", "7d"] as const) ? settings.refreshWindow : DEFAULT_PREFERENCES.refreshWindow,
 	};
 }
 
@@ -183,7 +170,7 @@ async function loadPreferences(): Promise<Preferences> {
 	const settings = await readJsonObject(SETTINGS_FILE);
 	const preferences = normalizePreferences(settings[SETTINGS_KEY]);
 	const persisted = asObject(settings[SETTINGS_KEY]);
-	if (!persisted || persisted.usageMode !== preferences.usageMode || persisted.refreshWindow !== preferences.refreshWindow) {
+	if (!persisted || persisted.usageMode !== preferences.usageMode || "refreshWindow" in persisted) {
 		settings[SETTINGS_KEY] = preferences;
 		await writeJson(SETTINGS_FILE, settings);
 	}
@@ -248,7 +235,7 @@ function resetSeconds(window: UsageWindow | null | undefined): number | null {
 
 function rateLimitBucket(value: unknown): RateLimitBucket | null {
 	const record = asObject(value);
-	return record && ("primary_window" in record || "secondary_window" in record || "limit_reached" in record || "allowed" in record)
+	return record && ("primary_window" in record || "limit_reached" in record || "allowed" in record)
 		? record as RateLimitBucket
 		: null;
 }
@@ -268,20 +255,22 @@ function selectedCodexBucket(data: { rate_limit?: unknown; additional_rate_limit
 	return null;
 }
 
+function formatWindowLabel(seconds: unknown): string {
+	if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return "7d";
+	if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+	if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+	return `${Math.round(seconds / 3_600)}h`;
+}
+
 async function getCodexUsage(modelId: string | undefined): Promise<CodexUsageSnapshot> {
 	const bucket = selectedCodexBucket(await requestCodexUsage(), modelId);
-	const snapshot: CodexUsageSnapshot = {
-		leftPercent: { "5h": null, "7d": null },
-		resetInSeconds: { "5h": null, "7d": null },
+	const window = bucket?.primary_window;
+	return {
+		leftPercent: toPercentLeft(window?.used_percent),
+		resetInSeconds: resetSeconds(window),
+		windowLabel: formatWindowLabel(window?.limit_window_seconds),
 		isLimited: bucket?.limit_reached === true || bucket?.allowed === false,
 	};
-
-	for (const name of windowNames) {
-		const window = bucket?.[windows[name].field];
-		snapshot.leftPercent[name] = toPercentLeft(window?.used_percent);
-		snapshot.resetInSeconds[name] = resetSeconds(window);
-	}
-	return snapshot;
 }
 
 function codexModelLabel(modelId: string | undefined): string {
@@ -311,11 +300,9 @@ function formatCountdown(seconds: number | null): string | null {
 
 function formatCodexStatus(theme: Theme, usage: CodexUsageSnapshot, preferences: Preferences, modelId: string | undefined): string {
 	const title = theme.fg(usage.isLimited ? "error" : "dim", codexModelLabel(modelId));
-	const usageText = windowNames
-		.map(name => `${theme.fg("dim", windows[name].label)}${formatPercent(theme, usage.leftPercent[name], preferences.usageMode)}`)
-		.join(" ");
-	const reset = formatCountdown(usage.resetInSeconds[preferences.refreshWindow]);
-	const resetText = reset ? theme.fg("dim", ` (${windows[preferences.refreshWindow].label}↺${reset})`) : "";
+	const usageText = `${theme.fg("dim", `${usage.windowLabel}:`)}${formatPercent(theme, usage.leftPercent, preferences.usageMode)}`;
+	const reset = formatCountdown(usage.resetInSeconds);
+	const resetText = reset ? theme.fg("dim", ` (↺${reset})`) : "";
 	return `${title} ${usageText}${resetText}`;
 }
 

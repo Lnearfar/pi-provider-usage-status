@@ -1,0 +1,44 @@
+{
+  "name": "pi-provider-usage-status",
+  "version": "0.1.0",
+  "description": "A Pi extension that shows Codex subscription usage and DeepSeek balance in the footer.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Jingyuan Li <nearfar1jy@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Lnearfar/pi-provider-usage-status.git"
+  },
+  "homepage": "https://github.com/Lnearfar/pi-provider-usage-status#readme",
+  "bugs": {
+    "url": "https://github.com/Lnearfar/pi-provider-usage-status/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "codex",
+    "deepseek",
+    "usage",
+    "subscription"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}
