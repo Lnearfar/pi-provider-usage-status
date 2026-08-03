@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-usage-status",
   "version": "0.1.0",
-  "description": "A Pi extension that shows Codex subscription usage and DeepSeek balance in the footer.",
+  "description": "A Pi extension that shows Codex usage and DeepSeek or FaroAPI balance in the footer.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -19,6 +19,7 @@
     "pi-extension",
     "codex",
     "deepseek",
+    "faroapi",
     "usage",
     "subscription"
   ],
@@ -26,7 +27,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "rm -rf .test-dist && tsc --noEmit false --outDir .test-dist && node .test-dist/test.js; status=$?; rm -rf .test-dist; exit $status"
   },
   "pi": {
     "extensions": [

@@ -5,12 +5,16 @@ import path from "node:path";
 
 const STATUS_KEY = "provider-usage";
 const CODEX_REFRESH_INTERVAL_MS = 60_000;
-const DEEPSEEK_COOLDOWN_MS = 30_000;
+const BALANCE_COOLDOWN_MS = 30_000;
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_MISSING_AUTH_ERROR = "Missing openai-codex OAuth access/accountId";
 const SPARK_MODEL_ID = "gpt-5.3-codex-spark";
 const SPARK_LIMIT_NAME = "GPT-5.3-Codex-Spark";
 const DEEPSEEK_BALANCE_API_URL = "https://api.deepseek.com/user/balance";
+const FARO_ACCOUNT_API_URL = "https://faroapi.com/api/user/self";
+const FARO_STATUS_API_URL = "https://faroapi.com/api/status";
+const FARO_MISSING_AUTH_ERROR = "Missing FARO_ACCESS_TOKEN/FARO_USER_ID";
+const FARO_INVALID_AUTH_ERROR = "Invalid Faro account credentials";
 const PROXY_MANAGED_SENTINEL = "proxy-managed";
 
 const agentDir = process.env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
@@ -54,6 +58,10 @@ type DeepSeekBalance = {
 		grantedBalance: string;
 		toppedUpBalance: string;
 	}>;
+};
+
+type FaroBalance = {
+	availableUsd: number;
 };
 
 const DEFAULT_PREFERENCES = { usageMode: "left" } satisfies Preferences;
@@ -135,9 +143,14 @@ function isDeepSeekProvider(ctx: ExtensionContext): boolean {
 	return isProvider(modelProvider(ctx), ["deepseek"]);
 }
 
-function activeProvider(ctx: ExtensionContext): "codex" | "deepseek" | undefined {
+function isFaroProvider(ctx: ExtensionContext): boolean {
+	return isProvider(modelProvider(ctx), ["faro"]);
+}
+
+function activeProvider(ctx: ExtensionContext): "codex" | "deepseek" | "faro" | undefined {
 	if (isCodexProvider(ctx)) return "codex";
 	if (isDeepSeekProvider(ctx)) return "deepseek";
+	if (isFaroProvider(ctx)) return "faro";
 	return undefined;
 }
 
@@ -310,9 +323,9 @@ function unavailableCodexStatus(theme: Theme, modelId: string | undefined): stri
 	return theme.fg("warning", `${codexModelLabel(modelId)} unavailable`);
 }
 
-async function buildDeepSeekAuthHeaders(ctx: ExtensionContext): Promise<Record<string, string>> {
+async function buildApiKeyAuthHeaders(ctx: ExtensionContext, provider: string): Promise<Record<string, string>> {
 	const modelRegistry = contextValue(() => ctx.modelRegistry);
-	const apiKey = modelRegistry ? await modelRegistry.getApiKeyForProvider("deepseek") : undefined;
+	const apiKey = modelRegistry ? await modelRegistry.getApiKeyForProvider(provider) : undefined;
 	const headers: Record<string, string> = { "Accept-Encoding": "identity" };
 	if (apiKey && apiKey !== PROXY_MANAGED_SENTINEL) headers.Authorization = `Bearer ${apiKey}`;
 	return headers;
@@ -334,7 +347,7 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
 }
 
 async function getDeepSeekBalance(ctx: ExtensionContext): Promise<DeepSeekBalance> {
-	const data = asObject(await fetchJson(DEEPSEEK_BALANCE_API_URL, { headers: await buildDeepSeekAuthHeaders(ctx) }));
+	const data = asObject(await fetchJson(DEEPSEEK_BALANCE_API_URL, { headers: await buildApiKeyAuthHeaders(ctx, "deepseek") }));
 	const infos = Array.isArray(data?.balance_infos) ? data.balance_infos : [];
 	return {
 		isAvailable: data?.is_available === true,
@@ -375,10 +388,46 @@ function renderDeepSeekStatus(data: DeepSeekBalance, theme: Theme): string {
 	return theme.fg("muted", "DeepSeek:") + colorForCredit(amount, theme)(formatMoney(amount, balance.currency));
 }
 
-function renderDeepSeekError(error: unknown, theme: Theme): string {
+function faroAccountHeaders(): Record<string, string> {
+	const accessToken = process.env.FARO_ACCESS_TOKEN?.trim();
+	const userId = process.env.FARO_USER_ID?.trim();
+	if (!accessToken || !userId) throw new Error(FARO_MISSING_AUTH_ERROR);
+	return {
+		Authorization: `Bearer ${accessToken}`,
+		"New-Api-User": userId,
+		"Accept-Encoding": "identity",
+	};
+}
+
+export function parseFaroBalance(accountValue: unknown, statusValue: unknown): FaroBalance {
+	const account = asObject(accountValue);
+	const data = asObject(account?.data);
+	const status = asObject(asObject(statusValue)?.data);
+	const quotaPerUnit = typeof status?.quota_per_unit === "number" ? status.quota_per_unit : Number.NaN;
+	const quota = typeof data?.quota === "number" ? data.quota : Number.NaN;
+	if (account?.success !== true || !data || !Number.isFinite(quotaPerUnit) || quotaPerUnit <= 0 || !Number.isFinite(quota)) {
+		throw new Error("badjson: invalid Faro account response");
+	}
+	return { availableUsd: quota / quotaPerUnit };
+}
+
+async function getFaroBalance(): Promise<FaroBalance> {
+	const [account, status] = await Promise.all([
+		fetchJson(FARO_ACCOUNT_API_URL, { headers: faroAccountHeaders() }),
+		fetchJson(FARO_STATUS_API_URL),
+	]);
+	if (asObject(account)?.success === false) throw new Error(FARO_INVALID_AUTH_ERROR);
+	return parseFaroBalance(account, status);
+}
+
+function renderFaroStatus(data: FaroBalance, theme: Theme): string {
+	return theme.fg("muted", "Faro:") + colorForCredit(data.availableUsd, theme)(formatMoney(data.availableUsd, "USD"));
+}
+
+function renderBalanceError(provider: string, error: unknown, theme: Theme): string {
 	const message = errorMessage(error);
 	const code = message.match(/\b(http\d+|fetch|badjson)\b/)?.[1] ?? "fetch";
-	return theme.fg("muted", "DeepSeek:") + theme.fg("error", `<err:${code}>`);
+	return theme.fg("muted", `${provider}:`) + theme.fg("error", `<err:${code}>`);
 }
 
 class ProviderUsageStatus {
@@ -394,6 +443,10 @@ class ProviderUsageStatus {
 	private deepSeekInFlight = false;
 	private lastDeepSeekData?: DeepSeekBalance;
 	private lastDeepSeekFetchTime = 0;
+	private faroInFlight = false;
+	private faroQueued?: { ctx: ExtensionContext; generation: number; force: boolean };
+	private lastFaroData?: FaroBalance;
+	private lastFaroFetchTime = 0;
 
 	public constructor(private readonly pi: ExtensionAPI) {
 		pi.on("session_start", (_event, ctx) => this.start(ctx));
@@ -413,6 +466,7 @@ class ProviderUsageStatus {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
 		this.codexQueued = undefined;
+		this.faroQueued = undefined;
 		this.ctx = undefined;
 		this.generation++;
 	}
@@ -477,6 +531,9 @@ class ProviderUsageStatus {
 			case "deepseek":
 				await this.refreshDeepSeek(ctx, generation, force);
 				break;
+			case "faro":
+				await this.refreshFaro(ctx, generation, force);
+				break;
 			default:
 				setStatus(ctx, undefined);
 		}
@@ -539,7 +596,7 @@ class ProviderUsageStatus {
 		if (!contextHasUI(ctx) || !this.isCurrent(generation) || !isDeepSeekProvider(ctx) || this.deepSeekInFlight) return;
 		const now = Date.now();
 		const cachedTheme = contextTheme(ctx);
-		if (!force && this.lastDeepSeekData && now - this.lastDeepSeekFetchTime < DEEPSEEK_COOLDOWN_MS && cachedTheme) {
+		if (!force && this.lastDeepSeekData && now - this.lastDeepSeekFetchTime < BALANCE_COOLDOWN_MS && cachedTheme) {
 			setStatus(ctx, renderDeepSeekStatus(this.lastDeepSeekData, cachedTheme));
 			return;
 		}
@@ -556,9 +613,49 @@ class ProviderUsageStatus {
 		} catch (error) {
 			if (!this.isCurrent(generation) || !isDeepSeekProvider(ctx)) return;
 			const theme = contextTheme(ctx);
-			if (theme) setStatus(ctx, renderDeepSeekError(error, theme));
+			if (theme) setStatus(ctx, renderBalanceError("DeepSeek", error, theme));
 		} finally {
 			this.deepSeekInFlight = false;
+		}
+	}
+
+	private async refreshFaro(ctx: ExtensionContext, generation = this.generation, force = false): Promise<void> {
+		if (!contextHasUI(ctx) || !this.isCurrent(generation) || !isFaroProvider(ctx)) return;
+		if (this.faroInFlight) {
+			this.faroQueued = { ctx, generation, force };
+			return;
+		}
+		const now = Date.now();
+		const cachedTheme = contextTheme(ctx);
+		if (!force && this.lastFaroData && now - this.lastFaroFetchTime < BALANCE_COOLDOWN_MS && cachedTheme) {
+			setStatus(ctx, renderFaroStatus(this.lastFaroData, cachedTheme));
+			return;
+		}
+
+		this.faroInFlight = true;
+		try {
+			const data = await getFaroBalance();
+			if (!this.isCurrent(generation) || !isFaroProvider(ctx)) return;
+			const theme = contextTheme(ctx);
+			if (!theme) return;
+			this.lastFaroData = data;
+			this.lastFaroFetchTime = now;
+			setStatus(ctx, renderFaroStatus(data, theme));
+		} catch (error) {
+			if (!this.isCurrent(generation) || !isFaroProvider(ctx)) return;
+			const theme = contextTheme(ctx);
+			if (errorMessage(error).includes(FARO_MISSING_AUTH_ERROR)) {
+				if (theme) setStatus(ctx, theme.fg("warning", "Faro:auth required"));
+			} else if (errorMessage(error).includes(FARO_INVALID_AUTH_ERROR)) {
+				if (theme) setStatus(ctx, theme.fg("error", "Faro:auth invalid"));
+			} else if (theme) {
+				setStatus(ctx, renderBalanceError("Faro", error, theme));
+			}
+		} finally {
+			this.faroInFlight = false;
+			const queued = this.faroQueued;
+			this.faroQueued = undefined;
+			if (queued && this.isCurrent(queued.generation)) this.runInBackground(this.refreshFaro(queued.ctx, queued.generation, queued.force), queued.ctx);
 		}
 	}
 
