@@ -41,12 +41,17 @@ type RateLimitBucket = {
 	allowed?: boolean;
 	limit_reached?: boolean;
 	primary_window?: UsageWindow | null;
+	secondary_window?: UsageWindow | null;
 };
 
-type CodexUsageSnapshot = {
+type CodexUsageWindow = {
 	leftPercent: number | null;
 	resetInSeconds: number | null;
 	windowLabel: string;
+};
+
+type CodexUsageSnapshot = {
+	windows: CodexUsageWindow[];
 	isLimited: boolean;
 };
 
@@ -275,15 +280,27 @@ function formatWindowLabel(seconds: unknown): string {
 	return `${Math.round(seconds / 3_600)}h`;
 }
 
-async function getCodexUsage(modelId: string | undefined): Promise<CodexUsageSnapshot> {
-	const bucket = selectedCodexBucket(await requestCodexUsage(), modelId);
-	const window = bucket?.primary_window;
+function parseCodexWindow(window: UsageWindow | null | undefined): CodexUsageWindow | null {
+	if (!window) return null;
 	return {
-		leftPercent: toPercentLeft(window?.used_percent),
+		leftPercent: toPercentLeft(window.used_percent),
 		resetInSeconds: resetSeconds(window),
-		windowLabel: formatWindowLabel(window?.limit_window_seconds),
+		windowLabel: formatWindowLabel(window.limit_window_seconds),
+	};
+}
+
+export function parseCodexUsage(data: { rate_limit?: unknown; additional_rate_limits?: unknown }, modelId: string | undefined): CodexUsageSnapshot {
+	const bucket = selectedCodexBucket(data, modelId);
+	const windows = [parseCodexWindow(bucket?.primary_window), parseCodexWindow(bucket?.secondary_window)]
+		.filter((window): window is CodexUsageWindow => window !== null);
+	return {
+		windows,
 		isLimited: bucket?.limit_reached === true || bucket?.allowed === false,
 	};
+}
+
+async function getCodexUsage(modelId: string | undefined): Promise<CodexUsageSnapshot> {
+	return parseCodexUsage(await requestCodexUsage(), modelId);
 }
 
 function codexModelLabel(modelId: string | undefined): string {
@@ -313,10 +330,14 @@ function formatCountdown(seconds: number | null): string | null {
 
 function formatCodexStatus(theme: Theme, usage: CodexUsageSnapshot, preferences: Preferences, modelId: string | undefined): string {
 	const title = theme.fg(usage.isLimited ? "error" : "dim", codexModelLabel(modelId));
-	const usageText = `${theme.fg("dim", `${usage.windowLabel}:`)}${formatPercent(theme, usage.leftPercent, preferences.usageMode)}`;
-	const reset = formatCountdown(usage.resetInSeconds);
-	const resetText = reset ? theme.fg("dim", ` (↺${reset})`) : "";
-	return `${title} ${usageText}${resetText}`;
+	const usageText = usage.windows.length
+		? usage.windows.map(window => {
+				const value = `${theme.fg("dim", `${window.windowLabel}:`)}${formatPercent(theme, window.leftPercent, preferences.usageMode)}`;
+				const reset = formatCountdown(window.resetInSeconds);
+				return `${value}${reset ? theme.fg("dim", ` (↺${reset})`) : ""}`;
+		  }).join(" ")
+		: formatPercent(theme, null, preferences.usageMode);
+	return `${title} ${usageText}`;
 }
 
 function unavailableCodexStatus(theme: Theme, modelId: string | undefined): string {

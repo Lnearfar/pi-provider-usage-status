@@ -4,7 +4,7 @@ A lightweight [Pi](https://github.com/earendil-works/pi-mono) extension that dis
 
 ## Features
 
-- **OpenAI Codex:** shows the remaining or used percentage, rate-limit window, and reset countdown.
+- **OpenAI Codex:** shows the remaining or used percentage for both rate-limit windows (typically 5 hours and 7 days), with reset countdowns.
 - **Codex Spark:** automatically selects the dedicated Spark rate-limit bucket.
 - **DeepSeek:** shows the current API balance.
 - **FaroAPI:** shows the real web-account balance using FaroAPI management credentials.
@@ -84,12 +84,15 @@ No credentials or usage data are written to this repository or sent elsewhere.
 ## Development
 
 ```bash
-git clone https://github.com/Lnearfar/pi-provider-usage-status.git
-cd pi-provider-usage-status
+cd /home/jingyuan/Documents/code/pi-extensions/pi-provider-usage-status
 npm install
 npm run check
 npm test
 pi -e ./index.ts
+git add index.ts test.ts README.md
+git commit -m "show Codex five-hour and weekly usage windows"
+git push origin main
+pi update git:github.com/Lnearfar/pi-provider-usage-status
 ```
 
 ## License
